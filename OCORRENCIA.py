@@ -131,7 +131,7 @@ else:
     if menu == 'Registrar Ocorrência':
         titulo = st.text_input('Título')
         categoria = st.selectbox('Categoria', [
-            'JURÍDICO', 'TROCA DE PRODUTO', 'RECLAMAÇÃO', 'ENTREGA DE CURRÍCULO',
+            'JURÍDICO', 'REUNIÃO', 'MANUTENÇÃO', 'ABORDAGEM DE FURTO', 'ACIDENTE', 'TROCA DE PRODUTO', 'RECLAMAÇÃO', 'ENTREGA DE CURRÍCULO',
             'ENTREVISTA', 'ENTRADA DE PROMOTOR', 'SAÍDA DE PROMOTOR', 
             'BATIDA DE CAIXA', 'TROCA DE TURNO'
         ])
@@ -264,4 +264,5 @@ else:
                 st.success('Usuário excluído')
         else:
             st.info("Nenhum usuário cadastrado além do admin.")
+
 
