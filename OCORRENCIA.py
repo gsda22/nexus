@@ -54,30 +54,41 @@ def hash_senha(senha):
 def gerar_pdf(ocorrencia):
     pdf = FPDF()
     pdf.add_page()
+    
+    # Adiciona logo se existir
     if os.path.exists('logo.png'):
         pdf.image('logo.png', 10, 8, 33)
-    pdf.set_font('Arial', 'B', 12)
+    
+    # Fonte UTF-8
+    pdf.add_font('DejaVu', '', 'DejaVuSans.ttf', uni=True)
+    pdf.set_font('DejaVu', 'B', 12)
     pdf.cell(0, 10, 'Nexus PPN: Controle Inteligente de Ocorrências', 0, 1, 'C')
     pdf.ln(10)
-    pdf.set_font('Arial', '', 10)
+    
+    pdf.set_font('DejaVu', '', 10)
     pdf.cell(0, 10, f'Título: {ocorrencia[1]}', 0, 1)
     pdf.cell(0, 10, f'Categoria: {ocorrencia[2]}', 0, 1)
     pdf.cell(0, 10, f'Loja: {ocorrencia[8]}', 0, 1)
+    
     data_formatada = datetime.strptime(ocorrencia[3], '%Y-%m-%d').strftime('%d/%m/%Y')
     hora_formatada = datetime.strptime(ocorrencia[4], '%H:%M:%S').strftime('%H:%M')
     pdf.cell(0, 10, f'Data/Hora: {data_formatada} {hora_formatada}', 0, 1)
+    
     pdf.multi_cell(0, 8, f'Ocorrência: {ocorrencia[5]}')
+    
     anexos = eval(ocorrencia[6]) if ocorrencia[6] else []
     if anexos:
         pdf.ln(5)
-        pdf.set_font('Arial', 'B', 10)
+        pdf.set_font('DejaVu', 'B', 10)
         pdf.cell(0, 10, 'Anexos:', 0, 1)
-        pdf.set_font('Arial', '', 10)
+        pdf.set_font('DejaVu', '', 10)
         for nome, _ in anexos:
             pdf.cell(0, 8, f'- {nome}', 0, 1)
+    
     pdf.ln(10)
     pdf.cell(0, 10, f'Assinatura: {ocorrencia[7] or "Pendente"}', 0, 1)
-    return pdf.output(dest='S').encode('latin1')
+    
+    return pdf.output(dest='S').encode('utf-8')
 
 # --- Sessão ---
 if 'last_activity' not in st.session_state:
@@ -131,7 +142,7 @@ else:
     if menu == 'Registrar Ocorrência':
         titulo = st.text_input('Título')
         categoria = st.selectbox('Categoria', [
-            'JURÍDICO', 'TROCA DE PRODUTO', 'RECLAMAÇÃO', 'ENTREGA DE CURRÍCULO',
+            'JURÍDICO','REUNIÃO', 'MANUTENÇÃO', 'TROCA DE PRODUTO', 'RECLAMAÇÃO', 'ENTREGA DE CURRÍCULO',
             'ENTREVISTA', 'ENTRADA DE PROMOTOR', 'SAÍDA DE PROMOTOR', 
             'BATIDA DE CAIXA', 'TROCA DE TURNO'
         ])
@@ -221,23 +232,16 @@ else:
     # --- Gerenciar Usuários (admin) ---
     elif menu == 'Gerenciar Usuários' and st.session_state.usuario == admin_user:
         st.header("Gerenciar Usuários")
-
-        # Selecionar usuário
         c.execute('SELECT usuario FROM usuarios WHERE usuario != ?', (admin_user,))
         usuarios = [u[0] for u in c.fetchall()]
         if usuarios:
             user_selecionado = st.selectbox("Selecionar usuário", usuarios)
-
-            # Mostrar lojas disponíveis e atribuídas
             c.execute('SELECT * FROM lojas')
             lojas = c.fetchall()
             lojas_dict = {loja[1]: loja[0] for loja in lojas}
-
             c.execute('SELECT loja_id FROM usuario_lojas WHERE usuario = ?', (user_selecionado,))
             lojas_atribuídas_ids = [l[0] for l in c.fetchall()]
             lojas_atribuídas_nomes = [l[1] for l in lojas if l[0] in lojas_atribuídas_ids]
-
-            # Atualizar lojas
             novas_lojas = st.multiselect("Lojas atribuídas", list(lojas_dict.keys()), default=lojas_atribuídas_nomes)
             if st.button("Atualizar lojas"):
                 c.execute('DELETE FROM usuario_lojas WHERE usuario = ?', (user_selecionado,))
@@ -245,8 +249,6 @@ else:
                     c.execute('INSERT INTO usuario_lojas VALUES (?,?)', (user_selecionado, lojas_dict[loja]))
                 conn.commit()
                 st.success("Lojas atualizadas!")
-
-            # Alterar senha
             nova_senha_alt = st.text_input('Nova senha', type='password')
             if st.button('Alterar senha'):
                 if nova_senha_alt:
@@ -255,8 +257,6 @@ else:
                     st.success('Senha alterada')
                 else:
                     st.warning("Digite uma nova senha!")
-
-            # Excluir usuário
             if st.button('Excluir usuário'):
                 c.execute('DELETE FROM usuarios WHERE usuario = ?', (user_selecionado,))
                 c.execute('DELETE FROM usuario_lojas WHERE usuario = ?', (user_selecionado,))
