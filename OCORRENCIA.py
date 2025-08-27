@@ -188,6 +188,7 @@ if 'last_activity' not in st.session_state:
 if 'usuario' in st.session_state and (datetime.now() - st.session_state.last_activity).seconds > LOGOUT_TIMEOUT:
     del st.session_state['usuario']
     if 'lojas_acesso' in st.session_state:
+    if 'lojas_acesso' in st.session_state:
     del st.session_state['lojas_acesso']
 
     st.warning('Sessão expirada!')
