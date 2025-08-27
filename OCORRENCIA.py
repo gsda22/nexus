@@ -1,291 +1,203 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import sqlite3
 import hashlib
 from fpdf import FPDF
-from datetime import datetime
+from datetime import datetime, date, time
 import base64
 import os
+import json
 
-# --- Configurações iniciais ---
-db = 'ocorrencias.db'
-admin_user = 'admin'
-admin_pass = hashlib.sha256('123456'.encode()).hexdigest()
-logout_timeout = 300  # 5 minutos
+# ==========================
+# CONFIG INICIAIS
+# ==========================
+st.set_page_config(page_title="Nexus PPN - Ocorrências", layout="wide")
+DB_FILE = 'ocorrencias.db'
+ADMIN_USER = 'admin'
+ADMIN_PASS = hashlib.sha256('123456'.encode()).hexdigest()
+LOGOUT_TIMEOUT = 300  # segundos (5 min)
 
-# --- Banco de dados ---
-conn = sqlite3.connect(db, check_same_thread=False)
+CATEGORIAS = [
+    'JURÍDICO', 'REUNIÃO', 'MANUTENÇÃO', 'ABORDAGEM', 'INCIDENTE', 'TROCA DE PRODUTO', 'RECLAMAÇÃO', 'ENTREGA DE CURRÍCULO',
+    'ENTREVISTA', 'ENTRADA DE PROMOTOR', 'SAÍDA DE PROMOTOR',
+    'BATIDA DE CAIXA', 'TROCA DE TURNO'
+]
+
+LOJAS_INICIAIS = [
+    'SUSSUARANA', 'VIDA NOVA', 'ALPHAVILLE', 'VILAS',
+    'BURAQUINHO', 'ITINGA', 'TANCREDO NEVES'
+]
+
+# ==========================
+# DB - CONEXÃO GLOBAL
+# ==========================
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 c = conn.cursor()
 
-# Criar tabelas
-c.execute('''CREATE TABLE IF NOT EXISTS usuarios (usuario TEXT, senha TEXT)''')
-c.execute('''CREATE TABLE IF NOT EXISTS lojas (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)''')
-c.execute('''CREATE TABLE IF NOT EXISTS usuario_lojas (usuario TEXT, loja_id INTEGER,
-            FOREIGN KEY (usuario) REFERENCES usuarios(usuario),
-            FOREIGN KEY (loja_id) REFERENCES lojas(id))''')
-c.execute('''CREATE TABLE IF NOT EXISTS ocorrencias (
-    id INTEGER PRIMARY KEY,
-    titulo TEXT,
-    categoria TEXT,
-    data TEXT,
-    hora TEXT,
-    texto TEXT,
-    anexos TEXT,
-    assinatura1 TEXT,
-    loja TEXT
-)''')
-conn.commit()
+def init_db():
+    # usuarios
+    c.execute('''CREATE TABLE IF NOT EXISTS usuarios (
+        usuario TEXT PRIMARY KEY,
+        senha TEXT
+    )''')
 
-# Pré-cadastrar lojas
-lojas_iniciais = ['SUSSUARANA', 'VIDA NOVA', 'ALPHAVILLE', 'VILAS', 'BURAQUINHO', 'ITINGA', 'TANCREDO NEVES']
-for loja in lojas_iniciais:
-    c.execute('INSERT OR IGNORE INTO lojas (nome) VALUES (?)', (loja,))
-conn.commit()
+    # lojas
+    c.execute('''CREATE TABLE IF NOT EXISTS lojas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT UNIQUE
+    )''')
 
-# Criar usuário admin
-c.execute('SELECT * FROM usuarios WHERE usuario = ?', (admin_user,))
-if not c.fetchone():
-    c.execute('INSERT INTO usuarios VALUES (?,?)', (admin_user, admin_pass))
+    # relacao usuario-lojas
+    c.execute('''CREATE TABLE IF NOT EXISTS usuario_lojas (
+        usuario TEXT,
+        loja_id INTEGER,
+        FOREIGN KEY (usuario) REFERENCES usuarios(usuario),
+        FOREIGN KEY (loja_id) REFERENCES lojas(id)
+    )''')
+
+    # ocorrencias
+    c.execute('''CREATE TABLE IF NOT EXISTS ocorrencias (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        titulo TEXT,
+        categoria TEXT,
+        data TEXT,
+        hora TEXT,
+        texto TEXT,
+        anexos TEXT,         -- JSON: [[nome, base64], ...]
+        assinatura1 TEXT,    -- usuário que registrou
+        loja TEXT
+    )''')
     conn.commit()
 
-# --- Funções auxiliares ---
-def hash_senha(senha):
+    # lojas iniciais
+    for loja in LOJAS_INICIAIS:
+        c.execute('INSERT OR IGNORE INTO lojas (nome) VALUES (?)', (loja,))
+    conn.commit()
+
+    # admin
+    c.execute('SELECT 1 FROM usuarios WHERE usuario=?', (ADMIN_USER,))
+    if not c.fetchone():
+        c.execute('INSERT INTO usuarios (usuario, senha) VALUES (?,?)', (ADMIN_USER, ADMIN_PASS))
+        conn.commit()
+
+init_db()
+
+# ==========================
+# HELPERS
+# ==========================
+def hash_senha(senha: str) -> str:
     return hashlib.sha256(senha.encode()).hexdigest()
 
-def gerar_pdf(ocorrencia):
+def dumps_json(obj) -> str:
+    try:
+        return json.dumps(obj, ensure_ascii=False)
+    except Exception:
+        return "[]"
+
+def loads_anexos(s: str):
+    """Lê anexos tanto do formato JSON quanto do legado (eval)."""
+    if not s:
+        return []
+    try:
+        v = json.loads(s)
+        if isinstance(v, list):
+            return v
+        return []
+    except Exception:
+        # fallback para registros antigos que foram salvos com str(list(...))
+        try:
+            return list(eval(s))
+        except Exception:
+            return []
+
+def str_latin1_safe(x: str) -> str:
+    """Garante que a string cabe em latin1, trocando chars inválidos por '?'. """
+    if x is None:
+        return ""
+    return x.encode("latin1", "replace").decode("latin1")
+
+# ==========================
+# PDF (Arial padrão, sem TTF externo)
+# ==========================
+def gerar_pdf(o_row):
+    """
+    o_row é a tupla completa da tabela 'ocorrencias'
+    Índices:
+      0:id 1:titulo 2:categoria 3:data 4:hora 5:texto 6:anexos 7:assinatura1 8:loja
+    """
     pdf = FPDF()
     pdf.add_page()
-    
-    # Logo
-    if os.path.exists('logo.png'):
-        pdf.image('logo.png', 10, 8, 33)
-    
-    # Fonte UTF-8
-    fonte_path = 'DejaVuSans.ttf'  # ou 'fonts/DejaVuSans.ttf'
-    if os.path.exists(fonte_path):
-        pdf.add_font('DejaVu', '', fonte_path, uni=True)
-        pdf.set_font('DejaVu', 'B', 12)
-    else:
-        pdf.set_font('Arial', 'B', 12)
-    
-    pdf.cell(0, 10, 'Nexus PPN: Controle Inteligente de Ocorrências', 0, 1, 'C')
-    pdf.ln(10)
-    
-    # Conteúdo
-    if os.path.exists(fonte_path):
-        pdf.set_font('DejaVu', '', 10)
-    else:
-        pdf.set_font('Arial', '', 10)
-    
-    pdf.cell(0, 10, f'Título: {ocorrencia[1]}', 0, 1)
-    pdf.cell(0, 10, f'Categoria: {ocorrencia[2]}', 0, 1)
-    pdf.cell(0, 10, f'Loja: {ocorrencia[8]}', 0, 1)
-    
-    data_formatada = datetime.strptime(ocorrencia[3], '%Y-%m-%d').strftime('%d/%m/%Y')
-    hora_formatada = datetime.strptime(ocorrencia[4], '%H:%M:%S').strftime('%H:%M')
-    pdf.cell(0, 10, f'Data/Hora: {data_formatada} {hora_formatada}', 0, 1)
-    
-    pdf.multi_cell(0, 8, f'Ocorrência: {ocorrencia[5]}')
-    
-    anexos = eval(ocorrencia[6]) if ocorrencia[6] else []
-    if anexos:
-        pdf.ln(5)
-        if os.path.exists(fonte_path):
-            pdf.set_font('DejaVu', 'B', 10)
-        else:
-            pdf.set_font('Arial', 'B', 10)
-        pdf.cell(0, 10, 'Anexos:', 0, 1)
-        if os.path.exists(fonte_path):
-            pdf.set_font('DejaVu', '', 10)
-        else:
-            pdf.set_font('Arial', '', 10)
-        for nome, _ in anexos:
-            pdf.cell(0, 8, f'- {nome}', 0, 1)
-    
-    pdf.ln(10)
-    pdf.cell(0, 10, f'Assinatura: {ocorrencia[7] or "Pendente"}', 0, 1)
-    
-    return pdf.output(dest='S').encode('utf-8')
 
-# --- Sessão ---
+    # Cabeçalho
+    if os.path.exists('logo.png'):
+        try:
+            pdf.image('logo.png', 10, 8, 33)
+        except Exception:
+            pass
+
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, str_latin1_safe('Nexus PPN: Controle Inteligente de Ocorrências'), 0, 1, 'C')
+    pdf.ln(5)
+
+    pdf.set_font("Arial", "", 10)
+    # Campos
+    pdf.cell(0, 8, str_latin1_safe(f'Título: {o_row[1] or ""}'), 0, 1)
+    pdf.cell(0, 8, str_latin1_safe(f'Categoria: {o_row[2] or ""}'), 0, 1)
+    pdf.cell(0, 8, str_latin1_safe(f'Loja: {o_row[8] or ""}'), 0, 1)
+
+    # Data/Hora (formatar se possível)
+    data_fmt = o_row[3]
+    hora_fmt = o_row[4]
+    try:
+        data_fmt = datetime.strptime(o_row[3], '%Y-%m-%d').strftime('%d/%m/%Y')
+    except Exception:
+        pass
+    try:
+        hora_fmt = datetime.strptime(o_row[4], '%H:%M:%S').strftime('%H:%M')
+    except Exception:
+        pass
+    pdf.cell(0, 8, str_latin1_safe(f'Data/Hora: {data_fmt} {hora_fmt}'), 0, 1)
+
+    # Texto
+    pdf.ln(2)
+    pdf.set_font("Arial", "", 10)
+    pdf.multi_cell(0, 6, str_latin1_safe(f'Ocorrência: {o_row[5] or ""}'))
+
+    # Anexos
+    anexos = loads_anexos(o_row[6])
+    if anexos:
+        pdf.ln(4)
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 8, str_latin1_safe('Anexos:'), 0, 1)
+        pdf.set_font("Arial", "", 10)
+        for nome, _dados in anexos:
+            pdf.cell(0, 6, str_latin1_safe(f'- {nome}'), 0, 1)
+
+    # Assinatura
+    pdf.ln(4)
+    pdf.cell(0, 8, str_latin1_safe(f'Assinatura: {o_row[7] or "Pendente"}'), 0, 1)
+
+    # Retorna bytes prontos
+    return pdf.output(dest='S').encode('latin1')
+
+# ==========================
+# SESSÃO
+# ==========================
 if 'last_activity' not in st.session_state:
     st.session_state.last_activity = datetime.now()
-
-if 'usuario' in st.session_state and (datetime.now() - st.session_state.last_activity).seconds > logout_timeout:
+if 'usuario' in st.session_state and (datetime.now() - st.session_state.last_activity).seconds > LOGOUT_TIMEOUT:
     del st.session_state['usuario']
+    del st.session_state['lojas_acesso'] if 'lojas_acesso' in st.session_state else None
     st.warning('Sessão expirada!')
     st.rerun()
 
-# --- Login ---
+# ==========================
+# LOGIN
+# ==========================
 if 'usuario' not in st.session_state:
-    st.title('Login')
+    st.title('Login - Nexus PPN')
     if os.path.exists('logo.png'):
         st.image('logo.png', width=150)
+
     usuario = st.text_input('Usuário')
-    senha = st.text_input('Senha', type='password')
-    if st.button('Entrar'):
-        c.execute('SELECT * FROM usuarios WHERE usuario = ? AND senha = ?', (usuario, hash_senha(senha)))
-        if c.fetchone():
-            c.execute('''
-                SELECT lojas.id, lojas.nome
-                FROM lojas
-                JOIN usuario_lojas ON lojas.id = usuario_lojas.loja_id
-                WHERE usuario_lojas.usuario = ?
-            ''', (usuario,))
-            lojas_acesso = c.fetchall()
-            st.session_state.usuario = usuario
-            st.session_state.lojas_acesso = lojas_acesso
-            st.session_state.last_activity = datetime.now()
-            st.rerun()
-        else:
-            st.error('Usuário ou senha inválidos')
-
-# --- Área principal ---
-else:
-    st.session_state.last_activity = datetime.now()
-    st.sidebar.write(f'Logado como: {st.session_state.usuario}')
-    if st.sidebar.button('Sair'):
-        del st.session_state['usuario']
-        st.rerun()
-
-    st.title(f'Nexus PPN - Usuário: {st.session_state.usuario}')
-    menu = st.sidebar.selectbox(
-        'Menu', 
-        ['Registrar Ocorrência', 'Consultar', 'Validação', 'Gerenciar Usuários'] 
-        if st.session_state.usuario == admin_user else ['Registrar Ocorrência', 'Consultar', 'Validação']
-    )
-
-    # --- Registrar Ocorrência ---
-    if menu == 'Registrar Ocorrência':
-        titulo = st.text_input('Título')
-        categoria = st.selectbox('Categoria', [
-            'JURÍDICO', 'REUNIÃO', 'MANUTENÇÃO', 'TROCA DE PRODUTO', 'ABORDAGEM', 'RECLAMAÇÃO', 'ENTREGA DE CURRÍCULO',
-            'ENTREVISTA', 'ENTRADA DE PROMOTOR', 'SAÍDA DE PROMOTOR', 
-            'BATIDA DE CAIXA', 'TROCA DE TURNO'
-        ])
-        if st.session_state.lojas_acesso:
-            loja_selecionada = st.selectbox('Selecione a loja', [l[1] for l in st.session_state.lojas_acesso])
-        else:
-            st.warning('Nenhuma loja atribuída ao usuário.')
-            loja_selecionada = None
-        data = st.date_input('Data')
-        hora = st.time_input('Hora')
-        texto = st.text_area('Ocorrência')
-        anexos = st.file_uploader('Anexos', accept_multiple_files=True)
-        if st.button('Salvar') and loja_selecionada:
-            arquivos = [(a.name, base64.b64encode(a.read()).decode()) for a in anexos]
-            c.execute('INSERT INTO ocorrencias (titulo, categoria, data, hora, texto, anexos, assinatura1, loja) VALUES (?,?,?,?,?,?,?,?)',
-                      (titulo, categoria, str(data), str(hora), texto, str(arquivos), st.session_state.usuario, loja_selecionada))
-            conn.commit()
-            st.success('Ocorrência registrada')
-
-    # --- Consultar Ocorrência ---
-    elif menu == 'Consultar':
-        data_ini = st.date_input('Data inicial')
-        data_fim = st.date_input('Data final')
-        loja_filtro = st.selectbox('Filtrar por loja', [l[1] for l in st.session_state.lojas_acesso])
-        if st.button('Filtrar'):
-            c.execute('SELECT * FROM ocorrencias WHERE date(data) BETWEEN ? AND ? AND loja = ?', 
-                      (str(data_ini), str(data_fim), loja_filtro))
-            ocorrencias = c.fetchall()
-            for o in ocorrencias:
-                col1, col2, col3 = st.columns([1,2,1])
-                with col1:
-                    st.subheader(f'{o[1]}')
-                    st.write(f"Categoria: {o[2]}")
-                    data_formatada = datetime.strptime(o[3], '%Y-%m-%d').strftime('%d/%m/%Y')
-                    hora_formatada = datetime.strptime(o[4], '%H:%M:%S').strftime('%H:%M')
-                    st.write(f"Data/Hora: {data_formatada} {hora_formatada}")
-                    st.write(f"Loja: {o[8]}")
-                    st.write(f"Assinatura: {o[7] or 'Pendente'}")
-                with col2:
-                    st.write(o[5])
-                with col3:
-                    if o[6]:
-                        st.write('Anexos:')
-                        for nome, dados in eval(o[6]):
-                            b64 = base64.b64encode(base64.b64decode(dados)).decode()
-                            href = f'<a href="data:file/octet-stream;base64,{b64}" download="{nome}">{nome}</a>'
-                            st.markdown(href, unsafe_allow_html=True)
-                    pdf_bytes = gerar_pdf(o)
-                    b64_pdf = base64.b64encode(pdf_bytes).decode()
-                    st.markdown(f'<a href="data:application/pdf;base64,{b64_pdf}" download="ocorrencia_{o[0]}.pdf">Baixar PDF</a>', unsafe_allow_html=True)
-
-    # --- Validação / Exclusão ---
-    elif menu == 'Validação':
-        st.header("Validação de Ocorrências")
-        c.execute('SELECT * FROM ocorrencias')
-        ocorrencias = c.fetchall()
-        for o in ocorrencias:
-            col1, col2, col3 = st.columns([1,2,1])
-            with col1:
-                st.subheader(f'{o[1]}')
-                st.write(f"Categoria: {o[2]}")
-                data_formatada = datetime.strptime(o[3], '%Y-%m-%d').strftime('%d/%m/%Y')
-                hora_formatada = datetime.strptime(o[4], '%H:%M:%S').strftime('%H:%M')
-                st.write(f"Data/Hora: {data_formatada} {hora_formatada}")
-                st.write(f"Loja: {o[8]}")
-                st.write(f"Assinatura: {o[7] or 'Pendente'}")
-            with col2:
-                st.write(o[5])
-            with col3:
-                if o[6]:
-                    st.write('Anexos:')
-                    for nome, dados in eval(o[6]):
-                        b64 = base64.b64encode(base64.b64decode(dados)).decode()
-                        href = f'<a href="data:file/octet-stream;base64,{b64}" download="{nome}">{nome}</a>'
-                        st.markdown(href, unsafe_allow_html=True)
-                pdf_bytes = gerar_pdf(o)
-                b64_pdf = base64.b64encode(pdf_bytes).decode()
-                st.markdown(f'<a href="data:application/pdf;base64,{b64_pdf}" download="ocorrencia_{o[0]}.pdf">Baixar PDF</a>', unsafe_allow_html=True)
-
-                if st.session_state.usuario == admin_user or st.session_state.usuario == o[7]:
-                    if st.button(f'Excluir', key=f'excluir_{o[0]}'):
-                        c.execute('DELETE FROM ocorrencias WHERE id = ?', (o[0],))
-                        conn.commit()
-                        st.success("Ocorrência excluída")
-                        st.rerun()
-
-    # --- Gerenciar Usuários (admin) ---
-    elif menu == 'Gerenciar Usuários' and st.session_state.usuario == admin_user:
-        st.header("Gerenciar Usuários")
-        c.execute('SELECT usuario FROM usuarios WHERE usuario != ?', (admin_user,))
-        usuarios = [u[0] for u in c.fetchall()]
-        if usuarios:
-            user_selecionado = st.selectbox("Selecionar usuário", usuarios)
-
-            # Mostrar lojas disponíveis e atribuídas
-            c.execute('SELECT * FROM lojas')
-            lojas = c.fetchall()
-            lojas_dict = {loja[1]: loja[0] for loja in lojas}
-
-            c.execute('SELECT loja_id FROM usuario_lojas WHERE usuario = ?', (user_selecionado,))
-            lojas_atribuídas_ids = [l[0] for l in c.fetchall()]
-            lojas_atribuídas_nomes = [l[1] for l in lojas if l[0] in lojas_atribuídas_ids]
-
-            # Atualizar lojas
-            novas_lojas = st.multiselect("Lojas atribuídas", list(lojas_dict.keys()), default=lojas_atribuídas_nomes)
-            if st.button("Atualizar lojas"):
-                c.execute('DELETE FROM usuario_lojas WHERE usuario = ?', (user_selecionado,))
-                for loja in novas_lojas:
-                    c.execute('INSERT INTO usuario_lojas VALUES (?,?)', (user_selecionado, lojas_dict[loja]))
-                conn.commit()
-                st.success("Lojas atualizadas!")
-
-            # Alterar senha
-            nova_senha_alt = st.text_input('Nova senha', type='password')
-            if st.button('Alterar senha'):
-                if nova_senha_alt:
-                    c.execute('UPDATE usuarios SET senha = ? WHERE usuario = ?', (hash_senha(nova_senha_alt), user_selecionado))
-                    conn.commit()
-                    st.success('Senha alterada')
-                else:
-                    st.warning("Digite uma nova senha!")
-
-            # Excluir usuário
-            if st.button('Excluir usuário'):
-                c.execute('DELETE FROM usuarios WHERE usuario = ?', (user_selecionado,))
-                c.execute('DELETE FROM usuario_lojas WHERE usuario = ?', (user_selecionado,))
-                conn.commit()
-                st.success('Usuário excluído')
-        else:
-            st.info("Nenhum usuário cadastrado além do admin.")
+    senha = s
